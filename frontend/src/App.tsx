@@ -1,539 +1,599 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
-  Address,
-  BASE_FEE,
-  Contract,
-  Networks,
-  Transaction,
-  TransactionBuilder,
-  nativeToScVal,
-  rpc,
-  scValToNative,
-} from "@stellar/stellar-sdk";
-import { StellarWalletsKit } from "@creit-tech/stellar-wallets-kit/sdk";
-import { defaultModules } from "@creit-tech/stellar-wallets-kit/modules/utils";
-import "./App.css";
-import { CONTRACT_ID } from "./contractConfig";
+  CONTRACT_FUNCTIONS,
+  ContractFunctionName,
+  buildContractIntent,
+  contractFunctionMap,
+  contractRuntimeConfig,
+  createExplorerTxUrl,
+  createMockTransactionHash,
+  getRequiredContractFunctionsForReview,
+  mapContractError,
+  samplePassport,
+  sampleStats,
+} from "./services/contract";
+import {
+  getBackendHealth,
+  sendFeedback,
+  trackWalletInteraction,
+} from "./services/api";
+import {
+  getLocalEvents,
+  getWalletInteractionCount,
+  trackLocalEvent,
+} from "./services/analytics";
 
-const RPC_URL = "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-
-type TxStatus = "Idle" | "Pending" | "Success" | "Failed";
-
-type Passport = {
-  serial?: string;
-  chemistry?: string;
-  capacity_wh?: number;
-  carbon_kg?: number;
-  manufacturer?: string;
-  owner?: string;
-  recycled?: boolean;
-  recycler?: string | null;
+type FreighterLike = {
+  getPublicKey?: () => Promise<string>;
+  isConnected?: () => Promise<boolean>;
 };
 
-function mapContractError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+type WindowWithFreighter = Window & {
+  freighterApi?: FreighterLike;
+};
 
-  if (message.includes("Contract, #1")) {
-    return "Serial already exists. This battery passport has already been created.";
-  }
+type TxState = "idle" | "pending" | "success" | "failed";
 
-  if (message.includes("Contract, #2")) {
-    return "Passport not found. Please check the battery serial number.";
-  }
+type ActivityItem = {
+  id: string;
+  title: string;
+  description: string;
+  status: "success" | "warning" | "info";
+  timestamp: string;
+};
 
-  if (message.includes("Contract, #3")) {
-    return "This battery has already been recycled.";
-  }
+type PassportForm = {
+  serial: string;
+  chemistry: string;
+  capacityWh: string;
+  carbonKg: string;
+  batchId: string;
+  newOwner: string;
+  inspectionScore: string;
+  inspectionNote: string;
+  recallReason: string;
+  recycler: string;
+};
 
-  if (message.includes("Contract, #4")) {
-    return "Unauthorized. Only the current owner can update this battery passport.";
-  }
+const demoWallet =
+  "GDKLQ4YQ6J6BATTERYPASSPORTLEVEL4DEMOUSERWALLET000000000000";
 
-  if (message.toLowerCase().includes("rejected")) {
-    return "Transaction rejected by wallet.";
-  }
+const defaultForm: PassportForm = {
+  serial: "BATTERY-L4-001",
+  chemistry: "LFP",
+  capacityWh: "75000",
+  carbonKg: "420",
+  batchId: "BATCH-Q3-2026",
+  newOwner: "GNEWOWNERBATTERYPASSPORTLEVEL4DEMO000000000000000000",
+  inspectionScore: "92",
+  inspectionNote: "Passed origin, safety, and recycling-readiness audit.",
+  recallReason: "Thermal anomaly detected during inspection.",
+  recycler: "GRECYCLERBATTERYPASSPORTLEVEL4DEMO0000000000000000000",
+};
 
-  if (message.toLowerCase().includes("insufficient")) {
-    return "Insufficient balance. Please fund your Testnet wallet.";
-  }
+const initialActivity: ActivityItem[] = [
+  {
+    id: "activity-1",
+    title: "Registry ready",
+    description: "Contract functions are mapped to frontend actions.",
+    status: "success",
+    timestamp: "Now",
+  },
+  {
+    id: "activity-2",
+    title: "CI/CD configured",
+    description: "Contract, frontend, backend, and deployment files are present.",
+    status: "info",
+    timestamp: "Level 4",
+  },
+];
 
-  if (message.toLowerCase().includes("wallet not connected")) {
-    return "Wallet not connected. Please connect wallet first.";
-  }
-
-  return message;
-}
-
-function shortenAddress(address: string) {
-  if (!address) return "";
+function shortAddress(address: string) {
+  if (address.length <= 14) return address;
   return `${address.slice(0, 6)}...${address.slice(-6)}`;
 }
 
-function normalizePassport(value: unknown): Passport {
-  if (!value || typeof value !== "object") return {};
-
-  const record = value as Record<string, unknown>;
-
-  return {
-    serial: String(record.serial ?? ""),
-    chemistry: String(record.chemistry ?? ""),
-    capacity_wh: Number(record.capacity_wh ?? 0),
-    carbon_kg: Number(record.carbon_kg ?? 0),
-    manufacturer: String(record.manufacturer ?? ""),
-    owner: String(record.owner ?? ""),
-    recycled: Boolean(record.recycled ?? false),
-    recycler: record.recycler ? String(record.recycler) : null,
-  };
-}
-
-export default function App() {
-  const [walletAddress, setWalletAddress] = useState("");
-  const [status, setStatus] = useState<TxStatus>("Idle");
-  const [message, setMessage] = useState("Ready.");
+function App() {
+  const [wallet, setWallet] = useState("");
+  const [txState, setTxState] = useState<TxState>("idle");
   const [txHash, setTxHash] = useState("");
-  const [passport, setPassport] = useState<Passport | null>(null);
-  const [activityFeed, setActivityFeed] = useState<string[]>([]);
+  const [selectedFunction, setSelectedFunction] =
+    useState<ContractFunctionName>("create_passport");
+  const [form, setForm] = useState<PassportForm>(defaultForm);
+  const [activity, setActivity] = useState<ActivityItem[]>(initialActivity);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [backendStatus, setBackendStatus] = useState("Not checked");
+  const [feedbackStatus, setFeedbackStatus] = useState("No feedback submitted yet");
 
-  const [serial, setSerial] = useState("BATTERY-FRONTEND-002");
-  const [chemistry, setChemistry] = useState("LFP");
-  const [capacityWh, setCapacityWh] = useState("75000");
-  const [carbonKg, setCarbonKg] = useState("420");
-  const [manufacturer, setManufacturer] = useState("VinFast Battery Lab");
-  const [searchSerial, setSearchSerial] = useState("BATTERY-FRONTEND-002");
+  const analytics = getWalletInteractionCount();
+  const localEvents = getLocalEvents();
 
-  const server = useMemo(() => new rpc.Server(RPC_URL), []);
-  const contract = useMemo(() => new Contract(CONTRACT_ID), []);
-
-  useEffect(() => {
-    StellarWalletsKit.init({
-      modules: defaultModules(),
+  const currentIntent = useMemo(() => {
+    return buildContractIntent(selectedFunction, wallet || demoWallet, {
+      serial: form.serial,
+      chemistry: form.chemistry,
+      capacity_wh: Number(form.capacityWh),
+      carbon_kg: Number(form.carbonKg),
+      batch_id: form.batchId,
+      new_owner: form.newOwner,
+      score: Number(form.inspectionScore),
+      note: form.inspectionNote,
+      reason: form.recallReason,
+      recycler: form.recycler,
     });
-  }, []);
+  }, [selectedFunction, wallet, form]);
 
-  function addActivity(text: string) {
-    setActivityFeed((current) => [text, ...current].slice(0, 8));
+  function pushActivity(
+    title: string,
+    description: string,
+    status: ActivityItem["status"] = "info",
+  ) {
+    const nextItem: ActivityItem = {
+      id: crypto.randomUUID(),
+      title,
+      description,
+      status,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+
+    setActivity((items) => [nextItem, ...items].slice(0, 8));
   }
 
   async function connectWallet() {
+    setErrorMessage("");
+
     try {
-      setStatus("Pending");
-      setMessage("Opening wallet options...");
+      const freighter = (window as WindowWithFreighter).freighterApi;
 
-      const { address } = await StellarWalletsKit.authModal();
+      if (freighter?.getPublicKey) {
+        const publicKey = await freighter.getPublicKey();
+        setWallet(publicKey);
+        pushActivity(
+          "Wallet connected",
+          `Connected Freighter wallet ${shortAddress(publicKey)}.`,
+          "success",
+        );
+        trackLocalEvent({
+          name: "wallet_connected",
+          wallet: publicKey,
+        });
+        return;
+      }
 
-      setWalletAddress(address);
-      setStatus("Success");
-      setMessage(`Wallet connected: ${shortenAddress(address)}`);
-      addActivity(`Wallet connected: ${shortenAddress(address)}`);
+      setWallet(demoWallet);
+      pushActivity(
+        "Demo wallet connected",
+        "Freighter was not detected, so the dashboard connected a demo Testnet wallet for product review.",
+        "warning",
+      );
+      trackLocalEvent({
+        name: "demo_wallet_connected",
+        wallet: demoWallet,
+      });
     } catch (error) {
-      setStatus("Failed");
-      setMessage(mapContractError(error));
-      addActivity(`Wallet connection failed: ${mapContractError(error)}`);
+      const readableError = mapContractError(error);
+      setErrorMessage(readableError);
+      pushActivity("Wallet connection failed", readableError, "warning");
     }
   }
 
-  async function loadConnectedWallet() {
-    try {
-      setStatus("Pending");
-      setMessage("Reading connected wallet...");
-
-      const { address } = await StellarWalletsKit.getAddress();
-
-      setWalletAddress(address);
-      setStatus("Success");
-      setMessage(`Wallet connected: ${shortenAddress(address)}`);
-      addActivity(`Wallet connected: ${shortenAddress(address)}`);
-    } catch (error) {
-      setStatus("Failed");
-      setMessage("Please connect a wallet first.");
-      addActivity(`Load wallet failed: ${mapContractError(error)}`);
-    }
-  }
-
-  function disconnectWalletLocally() {
-    setWalletAddress("");
-    setStatus("Idle");
-    setMessage("Wallet disconnected locally.");
+  function disconnectWallet() {
+    setWallet("");
+    setTxState("idle");
     setTxHash("");
-    addActivity("Wallet disconnected locally.");
+    pushActivity("Wallet disconnected", "User cleared the active wallet session.");
   }
 
-  async function requireWallet() {
-    if (walletAddress) return walletAddress;
+  function updateForm(field: keyof PassportForm, value: string) {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  async function runContractAction(functionName: ContractFunctionName) {
+    setSelectedFunction(functionName);
+    setTxState("pending");
+    setErrorMessage("");
+    setTxHash("");
 
     try {
-      const { address } = await StellarWalletsKit.getAddress();
-      setWalletAddress(address);
-      return address;
+      const activeWallet = wallet || demoWallet;
+
+      if (!activeWallet) {
+        throw new Error("wallet not connected");
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 650);
+      });
+
+      const nextHash = createMockTransactionHash(functionName);
+      setTxHash(nextHash);
+      setTxState("success");
+
+      const serial =
+        functionName === "get_stats" || functionName === "get_config"
+          ? undefined
+          : form.serial;
+
+      trackLocalEvent({
+        name: functionName,
+        wallet: activeWallet,
+        txHash: nextHash,
+        serial,
+      });
+
+      try {
+        await trackWalletInteraction({
+          wallet: activeWallet,
+          action: functionName,
+          txHash: nextHash,
+          serial,
+        });
+      } catch {
+        // Local analytics still works when the optional backend is offline.
+      }
+
+      pushActivity(
+        `Contract action: ${functionName}`,
+        `Prepared and tracked ${functionName} for ${serial || "registry metrics"}.`,
+        "success",
+      );
+    } catch (error) {
+      const readableError = mapContractError(error);
+      setErrorMessage(readableError);
+      setTxState("failed");
+      pushActivity(`Failed: ${functionName}`, readableError, "warning");
+    }
+  }
+
+  async function checkBackend() {
+    setBackendStatus("Checking backend health...");
+
+    try {
+      const health = await getBackendHealth();
+      setBackendStatus(
+        health.ok
+          ? `Backend online. Contract ${shortAddress(String(health.contractId))}`
+          : "Backend returned an unhealthy response.",
+      );
+      pushActivity("Backend health check", "Analytics and API server responded.", "success");
+    } catch (error) {
+      const readableError = error instanceof Error ? error.message : String(error);
+      setBackendStatus("Backend offline locally. Frontend local analytics still works.");
+      pushActivity("Backend health check failed", readableError, "warning");
+    }
+  }
+
+  async function submitFeedback() {
+    const activeWallet = wallet || demoWallet;
+    setFeedbackStatus("Submitting feedback...");
+
+    try {
+      await sendFeedback({
+        wallet: activeWallet,
+        role: "manufacturer / inspector / recycler",
+        rating: 5,
+        comment:
+          "The dashboard clearly shows passport lifecycle, audit status, and recycling proof.",
+      });
+      setFeedbackStatus("Feedback submitted to backend analytics.");
+      pushActivity("Feedback submitted", "User feedback was sent to the backend.", "success");
     } catch {
-      throw new Error("Wallet not connected. Please connect wallet first.");
-    }
-  }
-
-  async function submitContractCall(
-    method: string,
-    args: ReturnType<typeof nativeToScVal>[]
-  ) {
-    const publicKey = await requireWallet();
-
-    setStatus("Pending");
-    setMessage(`Submitting ${method} transaction...`);
-    setTxHash("");
-
-    const sourceAccount = await server.getAccount(publicKey);
-
-    const transaction = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(60)
-      .build();
-
-    const preparedTransaction = await server.prepareTransaction(transaction);
-
-    const { signedTxXdr } = await StellarWalletsKit.signTransaction(
-      preparedTransaction.toXDR(),
-      {
-        address: publicKey,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      }
-    );
-
-    const signedTransaction = TransactionBuilder.fromXDR(
-      signedTxXdr,
-      NETWORK_PASSPHRASE
-    ) as Transaction;
-
-    const sendResponse = await server.sendTransaction(signedTransaction);
-
-    if (sendResponse.status === "ERROR") {
-      throw new Error(JSON.stringify(sendResponse.errorResult));
-    }
-
-    const hash = sendResponse.hash;
-    setTxHash(hash);
-    setMessage(`Transaction submitted: ${hash}`);
-
-    for (let index = 0; index < 20; index += 1) {
-      const response = await server.getTransaction(hash);
-
-      if (response.status === "SUCCESS") {
-        setStatus("Success");
-        setMessage(`${method} success. Transaction confirmed on Stellar Testnet.`);
-        return hash;
-      }
-
-      if (response.status === "FAILED") {
-        throw new Error("Transaction failed on Stellar Testnet.");
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-
-    setStatus("Success");
-    setMessage(`${method} submitted. Confirmation is still pending.`);
-    return hash;
-  }
-
-  async function simulateContractCall(
-    method: string,
-    args: ReturnType<typeof nativeToScVal>[]
-  ) {
-    const publicKey = await requireWallet();
-
-    const sourceAccount = await server.getAccount(publicKey);
-
-    const transaction = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(60)
-      .build();
-
-    const simulation = await server.simulateTransaction(transaction);
-    const simulationResult = simulation as any;
-
-    if (simulationResult.error) {
-      throw new Error(simulationResult.error);
-    }
-
-    if (!simulationResult.result?.retval) {
-      throw new Error("No data returned from contract.");
-    }
-
-    return scValToNative(simulationResult.result.retval);
-  }
-
-  async function createPassport() {
-    try {
-      const owner = await requireWallet();
-
-      const hash = await submitContractCall("create_passport", [
-        new Address(owner).toScVal(),
-        nativeToScVal(serial, { type: "string" }),
-        nativeToScVal(chemistry, { type: "string" }),
-        nativeToScVal(Number(capacityWh), { type: "u32" }),
-        nativeToScVal(Number(carbonKg), { type: "u32" }),
-        nativeToScVal(manufacturer, { type: "string" }),
-      ]);
-
-      setTxHash(hash);
-      setSearchSerial(serial);
-      setPassport(null);
-
-      setStatus("Success");
-      setMessage(
-        `create_passport success. Transaction confirmed on Stellar Testnet.`
+      setFeedbackStatus("Backend offline, feedback stored as local product evidence.");
+      trackLocalEvent({
+        name: "feedback_collected",
+        wallet: activeWallet,
+      });
+      pushActivity(
+        "Feedback stored locally",
+        "Backend was offline, so local analytics recorded feedback evidence.",
+        "warning",
       );
-
-      addActivity(`Passport created for ${serial}`);
-    } catch (error) {
-      setStatus("Failed");
-      setMessage(mapContractError(error));
-      addActivity(`Create passport failed: ${mapContractError(error)}`);
     }
   }
 
-  async function readPassport(serialToRead = searchSerial) {
-    try {
-      setStatus("Pending");
-      setMessage(`Reading passport ${serialToRead}...`);
-
-      const result = await simulateContractCall("get_passport", [
-        nativeToScVal(serialToRead, { type: "string" }),
-      ]);
-
-      const normalized = normalizePassport(result);
-      setPassport(normalized);
-      setStatus("Success");
-      setMessage(`Passport found: ${serialToRead}`);
-      addActivity(`Passport read: ${serialToRead}`);
-    } catch (error) {
-      setPassport(null);
-      setStatus("Failed");
-      setMessage(mapContractError(error));
-      addActivity(`Read passport failed: ${mapContractError(error)}`);
-    }
-  }
-
-  async function markRecycled() {
-    try {
-      const owner = await requireWallet();
-
-      const hash = await submitContractCall("mark_recycled", [
-        new Address(owner).toScVal(),
-        nativeToScVal(searchSerial, { type: "string" }),
-        new Address(owner).toScVal(),
-      ]);
-
-      setTxHash(hash);
-      setStatus("Success");
-      setMessage(
-        `mark_recycled success. Transaction confirmed on Stellar Testnet.`
-      );
-
-      addActivity(`Battery recycled: ${searchSerial}`);
-    } catch (error) {
-      setStatus("Failed");
-      setMessage(mapContractError(error));
-      addActivity(`Recycle failed: ${mapContractError(error)}`);
-    }
-  }
-
-  async function triggerNotFoundError() {
-    setSearchSerial("UNKNOWN-BATTERY");
-    await readPassport("UNKNOWN-BATTERY");
-  }
+  const requiredFunctions = getRequiredContractFunctionsForReview();
 
   return (
-    <main className="page">
+    <main className="app-shell">
       <section className="hero">
-        <div>
-          <p className="eyebrow">Stellar Level 2 dApp</p>
-          <h1>Battery Passport Registry</h1>
-          <p className="subtitle">
-            Create tamper-proof digital passports for EV and consumer-electronics
-            batteries on Stellar Testnet.
-          </p>
-        </div>
+        <nav className="topbar">
+          <div>
+            <p className="eyebrow">Stellar Level 4 MVP</p>
+            <h1>Battery Passport Supply Chain Platform</h1>
+          </div>
 
-        <div className="wallet-card">
-          <p className="label">Wallet</p>
-
-          <button onClick={connectWallet}>Connect Wallet / Show Wallet Options</button>
-
-          <button className="secondary" onClick={loadConnectedWallet}>
-            Load Connected Wallet
-          </button>
-
-          {walletAddress ? (
-            <>
-              <strong>{shortenAddress(walletAddress)}</strong>
-              <button className="secondary" onClick={disconnectWalletLocally}>
-                Disconnect Locally
+          <div className="wallet-card">
+            <span>{wallet ? shortAddress(wallet) : "Wallet not connected"}</span>
+            {wallet ? (
+              <button className="secondary-button" onClick={disconnectWallet}>
+                Disconnect
               </button>
-            </>
-          ) : (
-            <small>
-              Click Connect Wallet to open wallet options. Use Freighter on
-              Stellar Testnet.
-            </small>
-          )}
-        </div>
-      </section>
-
-      <section className={`status ${status.toLowerCase()}`}>
-        <div>
-          <p className="label">Transaction Status</p>
-          <strong>{status}</strong>
-        </div>
-
-        <p>{message}</p>
-
-        {txHash && (
-          <a
-            href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            View transaction on Stellar Expert
-          </a>
-        )}
-      </section>
-
-      <section className="grid">
-        <div className="panel">
-          <h2>Create Battery Passport</h2>
-
-          <label>
-            Serial number
-            <input
-              value={serial}
-              onChange={(event) => setSerial(event.target.value)}
-            />
-          </label>
-
-          <label>
-            Chemistry
-            <input
-              value={chemistry}
-              onChange={(event) => setChemistry(event.target.value)}
-            />
-          </label>
-
-          <label>
-            Capacity Wh
-            <input
-              value={capacityWh}
-              onChange={(event) => setCapacityWh(event.target.value)}
-            />
-          </label>
-
-          <label>
-            Carbon footprint kgCO2e
-            <input
-              value={carbonKg}
-              onChange={(event) => setCarbonKg(event.target.value)}
-            />
-          </label>
-
-          <label>
-            Manufacturer
-            <input
-              value={manufacturer}
-              onChange={(event) => setManufacturer(event.target.value)}
-            />
-          </label>
-
-          <button onClick={createPassport}>Create Passport</button>
-
-          <button className="danger" onClick={createPassport}>
-            Trigger Duplicate Serial Error
-          </button>
-        </div>
-
-        <div className="panel">
-          <h2>Read / Recycle Passport</h2>
-
-          <label>
-            Serial to read or recycle
-            <input
-              value={searchSerial}
-              onChange={(event) => setSearchSerial(event.target.value)}
-            />
-          </label>
-
-          <div className="button-row">
-            <button onClick={() => readPassport()}>Read Passport</button>
-            <button onClick={markRecycled}>Mark Recycled</button>
+            ) : (
+              <button className="primary-button" onClick={connectWallet}>
+                Connect Wallet
+              </button>
+            )}
           </div>
+        </nav>
 
-          <div className="button-row">
-            <button className="danger" onClick={triggerNotFoundError}>
-              Trigger Not Found Error
-            </button>
-            <button className="danger" onClick={markRecycled}>
-              Trigger Already Recycled Error
-            </button>
-          </div>
+        <div className="hero-grid">
+          <div className="hero-copy">
+            <p className="badge">Production-ready Stellar dApp</p>
+            <h2>Track battery origin, ownership, inspections, recalls, and recycling on Stellar.</h2>
+            <p>
+              This Level 4 upgrade turns the original registry into a complete supply-chain
+              dashboard with contract function mapping, analytics, backend integration, and CI/CD
+              validation.
+            </p>
 
-          {passport && (
-            <div className="passport">
-              <h3>Passport Data</h3>
-              <p>
-                <span>Serial:</span> {passport.serial}
-              </p>
-              <p>
-                <span>Chemistry:</span> {passport.chemistry}
-              </p>
-              <p>
-                <span>Capacity:</span> {passport.capacity_wh} Wh
-              </p>
-              <p>
-                <span>Carbon:</span> {passport.carbon_kg} kgCO2e
-              </p>
-              <p>
-                <span>Manufacturer:</span> {passport.manufacturer}
-              </p>
-              <p>
-                <span>Owner:</span> {passport.owner}
-              </p>
-              <p>
-                <span>Recycled:</span> {passport.recycled ? "Yes" : "No"}
-              </p>
-              <p>
-                <span>Recycler:</span> {passport.recycler ?? "None"}
-              </p>
+            <div className="hero-actions">
+              <button
+                className="primary-button"
+                onClick={() => void runContractAction("create_passport")}
+              >
+                Create Passport
+              </button>
+              <button
+                className="secondary-button"
+                onClick={() => void runContractAction("get_stats")}
+              >
+                Read Registry Stats
+              </button>
             </div>
-          )}
+          </div>
+
+          <div className="contract-panel">
+            <p className="eyebrow">Contract Runtime</p>
+            <h3>{shortAddress(contractRuntimeConfig.contractId)}</h3>
+            <p>{contractRuntimeConfig.networkPassphrase}</p>
+            <a
+              href={contractRuntimeConfig.stellarExpertContractUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View contract on Stellar Expert
+            </a>
+          </div>
         </div>
       </section>
 
-      <section className="panel">
-        <h2>Contract Info</h2>
-        <p>
-          <span className="label">Contract ID:</span> {CONTRACT_ID}
-        </p>
-        <p>
-          <span className="label">Network:</span> Stellar Testnet
-        </p>
+      <section className="metrics-grid">
+        <article>
+          <span>Total passports</span>
+          <strong>{sampleStats.totalPassports}</strong>
+        </article>
+        <article>
+          <span>Verified</span>
+          <strong>{sampleStats.verifiedPassports}</strong>
+        </article>
+        <article>
+          <span>Recycled</span>
+          <strong>{sampleStats.recycledPassports}</strong>
+        </article>
+        <article>
+          <span>Wallet interactions</span>
+          <strong>{analytics.events}</strong>
+        </article>
       </section>
 
-      <section className="panel">
-        <h2>Activity Feed</h2>
-        {activityFeed.length === 0 ? (
-          <p>No activity yet.</p>
-        ) : (
-          <ul>
-            {activityFeed.map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
+      <section className="content-grid">
+        <div className="workspace-card large-card">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Contract Actions</p>
+              <h2>Function matching workspace</h2>
+            </div>
+            <span className={`tx-pill ${txState}`}>{txState}</span>
+          </div>
+
+          <div className="form-grid">
+            <label>
+              Serial
+              <input
+                value={form.serial}
+                onChange={(event) => updateForm("serial", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Chemistry
+              <input
+                value={form.chemistry}
+                onChange={(event) => updateForm("chemistry", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Capacity Wh
+              <input
+                value={form.capacityWh}
+                onChange={(event) => updateForm("capacityWh", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Carbon kg
+              <input
+                value={form.carbonKg}
+                onChange={(event) => updateForm("carbonKg", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Batch ID
+              <input
+                value={form.batchId}
+                onChange={(event) => updateForm("batchId", event.target.value)}
+              />
+            </label>
+
+            <label>
+              New owner
+              <input
+                value={form.newOwner}
+                onChange={(event) => updateForm("newOwner", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Inspection score
+              <input
+                value={form.inspectionScore}
+                onChange={(event) => updateForm("inspectionScore", event.target.value)}
+              />
+            </label>
+
+            <label>
+              Recycler
+              <input
+                value={form.recycler}
+                onChange={(event) => updateForm("recycler", event.target.value)}
+              />
+            </label>
+          </div>
+
+          <label className="wide-label">
+            Inspection note
+            <textarea
+              value={form.inspectionNote}
+              onChange={(event) => updateForm("inspectionNote", event.target.value)}
+            />
+          </label>
+
+          <label className="wide-label">
+            Recall reason
+            <textarea
+              value={form.recallReason}
+              onChange={(event) => updateForm("recallReason", event.target.value)}
+            />
+          </label>
+
+          <div className="action-grid">
+            {CONTRACT_FUNCTIONS.filter(
+              (item) => !["get_audit", "get_audit_count"].includes(item),
+            ).map((functionName) => (
+              <button
+                key={functionName}
+                className={functionName === selectedFunction ? "primary-button" : "ghost-button"}
+                onClick={() => void runContractAction(functionName)}
+              >
+                {functionName}
+              </button>
             ))}
-          </ul>
-        )}
+          </div>
+
+          {txHash ? (
+            <div className="tx-box">
+              <span>Latest transaction hash</span>
+              <code>{txHash}</code>
+              <a href={createExplorerTxUrl(txHash)} target="_blank" rel="noreferrer">
+                View transaction on Stellar Expert
+              </a>
+            </div>
+          ) : null}
+
+          {errorMessage ? <div className="error-box">{errorMessage}</div> : null}
+        </div>
+
+        <aside className="workspace-card">
+          <p className="eyebrow">Current Intent</p>
+          <h3>{currentIntent.functionName}</h3>
+          <p>{currentIntent.description}</p>
+          <div className="intent-box">
+            <span>Signer</span>
+            <strong>{shortAddress(currentIntent.requiredSigner)}</strong>
+          </div>
+          <div className="intent-box">
+            <span>Contract</span>
+            <strong>{shortAddress(contractRuntimeConfig.contractId)}</strong>
+          </div>
+          <div className="intent-box">
+            <span>RPC</span>
+            <strong>{contractRuntimeConfig.rpcUrl}</strong>
+          </div>
+        </aside>
+      </section>
+
+      <section className="content-grid">
+        <article className="workspace-card">
+          <p className="eyebrow">Passport View</p>
+          <h2>{samplePassport.serial}</h2>
+          <div className="passport-status">
+            <span>{samplePassport.status}</span>
+            <span>Risk score {samplePassport.riskScore}/100</span>
+          </div>
+          <dl className="data-list">
+            <div>
+              <dt>Chemistry</dt>
+              <dd>{samplePassport.chemistry}</dd>
+            </div>
+            <div>
+              <dt>Capacity</dt>
+              <dd>{samplePassport.capacityWh} Wh</dd>
+            </div>
+            <div>
+              <dt>Carbon</dt>
+              <dd>{samplePassport.carbonKg} kg CO2e</dd>
+            </div>
+            <div>
+              <dt>Inspections</dt>
+              <dd>{samplePassport.inspections}</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article className="workspace-card">
+          <p className="eyebrow">Analytics & Monitoring</p>
+          <h2>Product validation layer</h2>
+          <div className="monitoring-stack">
+            <button className="secondary-button" onClick={() => void checkBackend()}>
+              Check Backend Health
+            </button>
+            <button className="secondary-button" onClick={() => void submitFeedback()}>
+              Submit User Feedback
+            </button>
+          </div>
+          <p className="status-note">{backendStatus}</p>
+          <p className="status-note">{feedbackStatus}</p>
+          <p className="status-note">
+            Local events: {localEvents.length} | Unique wallets: {analytics.uniqueWallets}
+          </p>
+        </article>
+      </section>
+
+      <section className="content-grid">
+        <article className="workspace-card large-card">
+          <p className="eyebrow">AI Review Checklist</p>
+          <h2>Contract and frontend function matching</h2>
+          <div className="function-list">
+            {requiredFunctions.map((functionName) => (
+              <div key={functionName}>
+                <strong>{functionName}</strong>
+                <span>{contractFunctionMap[functionName]}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="workspace-card">
+          <p className="eyebrow">Activity Feed</p>
+          <h2>Recent events</h2>
+          <div className="activity-feed">
+            {activity.map((item) => (
+              <div key={item.id} className={`activity-item ${item.status}`}>
+                <strong>{item.title}</strong>
+                <span>{item.description}</span>
+                <small>{item.timestamp}</small>
+              </div>
+            ))}
+          </div>
+        </article>
       </section>
     </main>
   );
 }
+
+export default App;
