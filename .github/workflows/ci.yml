@@ -16,20 +16,32 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
+
       - name: Cache Cargo registry and build output
         uses: Swatinem/rust-cache@v2
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+
       - name: Check smart contract for WASM target
         run: cargo check --workspace --target wasm32v1-none
+
       - name: Run smart contract tests
         run: cargo test --workspace
+
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli
+
       - name: Build Soroban smart contract
         run: stellar contract build
 
@@ -42,18 +54,23 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
       - name: Install frontend dependencies
         run: npm ci
+
       - name: Type-check frontend
         run: npm run type-check
+
       - name: Build frontend
         run: npm run build
+
       - name: Run frontend tests
         run: npm test
 
@@ -66,16 +83,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: server/package-lock.json
+
       - name: Install backend dependencies
         run: npm ci
+
       - name: Type-check backend
         run: npm run type-check
+
       - name: Build backend
         run: npm run build
 
@@ -85,6 +106,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Verify deployment files exist
         run: |
           test -f vercel.json
