@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 4,
+    "address": 6,
     "nonce": 0,
     "mux_id": 0
   },
@@ -13,25 +13,10 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "create_passport",
+              "function_name": "initialize",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
-                  "string": "BATTERY-002"
-                },
-                {
-                  "string": "NMC"
-                },
-                {
-                  "u32": 50000
-                },
-                {
-                  "u32": 300
-                },
-                {
-                  "string": "Samsung SDI"
                 }
               ]
             }
@@ -62,10 +47,7 @@
               "key": {
                 "vec": [
                   {
-                    "symbol": "Passport"
-                  },
-                  {
-                    "string": "BATTERY-002"
+                    "symbol": "Config"
                   }
                 ]
               },
@@ -74,39 +56,7 @@
                 "map": [
                   {
                     "key": {
-                      "symbol": "capacity_wh"
-                    },
-                    "val": {
-                      "u32": 50000
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "carbon_kg"
-                    },
-                    "val": {
-                      "u32": 300
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "chemistry"
-                    },
-                    "val": {
-                      "string": "NMC"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "manufacturer"
-                    },
-                    "val": {
-                      "string": "Samsung SDI"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "owner"
+                      "symbol": "admin"
                     },
                     "val": {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -114,24 +64,83 @@
                   },
                   {
                     "key": {
-                      "symbol": "recycled"
+                      "symbol": "initialized"
                     },
                     "val": {
-                      "bool": false
+                      "bool": true
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "Stats"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "map": [
+                  {
+                    "key": {
+                      "symbol": "active_passports"
+                    },
+                    "val": {
+                      "u32": 0
                     }
                   },
                   {
                     "key": {
-                      "symbol": "recycler"
+                      "symbol": "recalled_passports"
                     },
-                    "val": "void"
+                    "val": {
+                      "u32": 0
+                    }
                   },
                   {
                     "key": {
-                      "symbol": "serial"
+                      "symbol": "recycled_passports"
                     },
                     "val": {
-                      "string": "BATTERY-002"
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "total_inspections"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "total_passports"
+                    },
+                    "val": {
+                      "u32": 0
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "verified_passports"
+                    },
+                    "val": {
+                      "u32": 0
                     }
                   }
                 ]

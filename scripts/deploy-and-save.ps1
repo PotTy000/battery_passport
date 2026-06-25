@@ -1,212 +1,149 @@
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$ContractWorkspace = Join-Path $ProjectRoot "contract_workspace"
 $FrontendDir = Join-Path $ProjectRoot "frontend"
-
-$ContractName = "battery_passport"
-$IdentityName = "alice"
-$Network = "testnet"
-
-$WasmPath = Join-Path $ContractWorkspace "target\wasm32v1-none\release\$ContractName.wasm"
+$WasmPath = Join-Path $ProjectRoot "target\wasm32v1-none\release\battery_passport.wasm"
 $ContractInfoPath = Join-Path $ProjectRoot "CONTRACT_ID.txt"
-$EnvLocalPath = Join-Path $FrontendDir ".env.local"
 $ContractConfigPath = Join-Path $FrontendDir "src\contractConfig.ts"
 $DeployLogPath = Join-Path $ProjectRoot "deploy-output.txt"
+$IdentityName = "battery_passport_admin"
 
-function Write-Section {
-    param([string]$Message)
+function Write-Utf8NoBom {
+  param(
+    [string]$Path,
+    [string]$Content
+  )
 
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host " $Message" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
+  $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $Utf8NoBom)
 }
 
-function Assert-PathExists {
-    param(
-        [string]$Path,
-        [string]$Label
-    )
+function Stop-If-Failed {
+  param([string]$StepName)
 
-    if (!(Test-Path $Path)) {
-        throw "$Label not found: $Path"
-    }
+  if ($LASTEXITCODE -ne 0) {
+    throw "$StepName failed. Please check the terminal output above."
+  }
 }
-
-function Invoke-CheckedCommand {
-    param(
-        [string]$StepName,
-        [scriptblock]$Command
-    )
-
-    Write-Host ""
-    Write-Host $StepName -ForegroundColor Yellow
-
-    & $Command
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "$StepName failed. Please check the error above."
-    }
-}
-
-function Ensure-TestnetIdentity {
-    Write-Host ""
-    Write-Host "Checking Stellar identity: $IdentityName" -ForegroundColor Yellow
-
-    $addressOutput = & stellar keys address $IdentityName 2>&1
-    $addressExitCode = $LASTEXITCODE
-
-    if ($addressExitCode -eq 0) {
-        $address = ($addressOutput | ForEach-Object { $_.ToString() }) -join "`n"
-        Write-Host "Identity found:" -ForegroundColor Green
-        Write-Host $address
-        return
-    }
-
-    Write-Host "Identity not found. Creating and funding testnet identity..." -ForegroundColor Yellow
-
-    & stellar keys generate --fund $IdentityName --network $Network
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not create/fund Stellar identity: $IdentityName"
-    }
-
-    $newAddress = & stellar keys address $IdentityName
-    Write-Host "Identity created:" -ForegroundColor Green
-    Write-Host $newAddress
-}
-
-function Invoke-Deploy {
-    param([string]$SourceFlag)
-
-    Write-Host ""
-    Write-Host "Deploy command using $SourceFlag $IdentityName..." -ForegroundColor Gray
-
-    $output = & stellar contract deploy `
-        --wasm $WasmPath `
-        $SourceFlag $IdentityName `
-        --network $Network 2>&1
-
-    $exitCode = $LASTEXITCODE
-    $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
-
-    Write-Host $text
-
-    return @{
-        ExitCode = $exitCode
-        Text = $text
-    }
-}
-
-Write-Section "Battery Passport Deploy Script"
-
-Write-Host "Project root:" -ForegroundColor Cyan
-Write-Host $ProjectRoot
-
-Assert-PathExists $ContractWorkspace "Contract workspace"
-Assert-PathExists $FrontendDir "Frontend folder"
-Assert-PathExists $ContractConfigPath "Frontend contract config file"
-
-Push-Location $ContractWorkspace
-
-try {
-    Invoke-CheckedCommand "Step 1/5: Formatting Rust contract..." {
-        cargo fmt
-    }
-
-    Invoke-CheckedCommand "Step 2/5: Running contract tests..." {
-        cargo test
-    }
-
-    Invoke-CheckedCommand "Step 3/5: Building contract WASM..." {
-        stellar contract build
-    }
-}
-finally {
-    Pop-Location
-}
-
-Assert-PathExists $WasmPath "Built WASM file"
-
-Ensure-TestnetIdentity
 
 Write-Host ""
-Write-Host "Step 4/5: Deploying contract to Stellar Testnet..." -ForegroundColor Yellow
-Write-Host "Using WASM:" -ForegroundColor Gray
-Write-Host $WasmPath
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host " Battery Passport Level 4 Deploy Script" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
 
-$deployResult = Invoke-Deploy "--source-account"
+Set-Location $ProjectRoot
 
-if ($deployResult.ExitCode -ne 0) {
-    Write-Host ""
-    Write-Host "Deploy with --source-account failed. Trying --source..." -ForegroundColor Yellow
-    $deployResult = Invoke-Deploy "--source"
-}
-
-Set-Content -Path $DeployLogPath -Value $deployResult.Text -Encoding UTF8
-
-if ($deployResult.ExitCode -ne 0) {
-    Write-Host ""
-    Write-Host "Deploy failed. Full log saved to:" -ForegroundColor Red
-    Write-Host $DeployLogPath -ForegroundColor Red
-    throw "Contract deploy failed."
-}
-
-$contractMatches = [regex]::Matches($deployResult.Text, "C[A-Z0-9]{55}")
-
-if ($contractMatches.Count -eq 0) {
-    Write-Host ""
-    Write-Host "Could not automatically find Contract ID." -ForegroundColor Red
-    Write-Host "Full deploy output saved to:" -ForegroundColor Yellow
-    Write-Host $DeployLogPath -ForegroundColor Yellow
-    throw "Please copy Contract ID manually from the terminal output."
-}
-
-$contractId = $contractMatches[$contractMatches.Count - 1].Value
+Write-Host "Step 1/6: Formatting contract..." -ForegroundColor Yellow
+cargo fmt
+Stop-If-Failed "cargo fmt"
 
 Write-Host ""
-Write-Host "Step 5/5: Saving Contract ID..." -ForegroundColor Yellow
+Write-Host "Step 2/6: Running contract tests..." -ForegroundColor Yellow
+cargo test --workspace
+Stop-If-Failed "cargo test"
 
-Set-Content -Path $ContractInfoPath -Value $contractId -Encoding UTF8
-Set-Content -Path $EnvLocalPath -Value "VITE_CONTRACT_ID=$contractId" -Encoding UTF8
+Write-Host ""
+Write-Host "Step 3/6: Building contract wasm..." -ForegroundColor Yellow
+stellar contract build
+Stop-If-Failed "stellar contract build"
 
-$contractConfigContent = @"
-export const CONTRACT_ID = "$contractId";
+if (!(Test-Path $WasmPath)) {
+  throw "WASM file not found: $WasmPath"
+}
 
-export const NETWORK = "testnet";
+Write-Host ""
+Write-Host "Step 4/6: Checking Stellar Testnet identity..." -ForegroundColor Yellow
+$AddressOutput = & stellar keys address $IdentityName 2>$null
 
-export const STELLAR_EXPERT_CONTRACT_URL =
-  "https://stellar.expert/explorer/testnet/contract/$contractId";
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($AddressOutput)) {
+  Write-Host "Identity not found. Creating and funding Testnet identity: $IdentityName" -ForegroundColor Yellow
+  stellar keys generate --fund $IdentityName --network testnet
+  Stop-If-Failed "stellar keys generate"
+} else {
+  Write-Host "Using identity: $IdentityName" -ForegroundColor Green
+  Write-Host $AddressOutput
+}
+
+Write-Host ""
+Write-Host "Step 5/6: Deploying contract to Stellar Testnet..." -ForegroundColor Yellow
+Write-Host "Using wasm: $WasmPath" -ForegroundColor Gray
+
+$StdOutPath = Join-Path $ProjectRoot "deploy-stdout.tmp"
+$StdErrPath = Join-Path $ProjectRoot "deploy-stderr.tmp"
+
+$Arguments = @(
+  "contract",
+  "deploy",
+  "--wasm",
+  $WasmPath,
+  "--source-account",
+  $IdentityName,
+  "--network",
+  "testnet"
+)
+
+$Process = Start-Process `
+  -FilePath "stellar" `
+  -ArgumentList $Arguments `
+  -NoNewWindow `
+  -Wait `
+  -PassThru `
+  -RedirectStandardOutput $StdOutPath `
+  -RedirectStandardError $StdErrPath
+
+$StdOut = if (Test-Path $StdOutPath) { Get-Content $StdOutPath -Raw } else { "" }
+$StdErr = if (Test-Path $StdErrPath) { Get-Content $StdErrPath -Raw } else { "" }
+$DeployText = "$StdOut`n$StdErr"
+
+Write-Utf8NoBom $DeployLogPath $DeployText
+Write-Host $DeployText
+
+if ($Process.ExitCode -ne 0) {
+  throw "Contract deploy failed. Full log saved to $DeployLogPath"
+}
+
+$ContractMatches = [regex]::Matches($DeployText, "C[A-Z0-9]{55}")
+
+if ($ContractMatches.Count -eq 0) {
+  throw "Could not automatically find Contract ID. Check deploy-output.txt."
+}
+
+$ContractId = $ContractMatches[$ContractMatches.Count - 1].Value
+
+Write-Host ""
+Write-Host "Step 6/6: Saving Contract ID..." -ForegroundColor Yellow
+
+Write-Utf8NoBom $ContractInfoPath $ContractId
+
+$ContractConfigContent = @"
+import { Networks } from "@stellar/stellar-sdk";
+
+export const CONTRACT_ID = "$ContractId";
+export const RPC_URL = "https://soroban-testnet.stellar.org";
+export const NETWORK_PASSPHRASE = Networks.TESTNET;
+
+export const STELLAR_EXPERT_CONTRACT_URL = `https://stellar.expert/explorer/testnet/contract/` + CONTRACT_ID;
+export const STELLAR_EXPERT_TX_URL = "https://stellar.expert/explorer/testnet/tx";
 "@
 
-Set-Content -Path $ContractConfigPath -Value $contractConfigContent -Encoding UTF8
+Write-Utf8NoBom $ContractConfigPath $ContractConfigContent
+
+Remove-Item $StdOutPath -Force -ErrorAction SilentlyContinue
+Remove-Item $StdErrPath -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host " Deploy completed successfully!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
-
 Write-Host ""
 Write-Host "Contract ID:" -ForegroundColor Cyan
-Write-Host $contractId -ForegroundColor White
-
+Write-Host $ContractId -ForegroundColor White
 Write-Host ""
-Write-Host "Stellar Expert contract link:" -ForegroundColor Cyan
-Write-Host "https://stellar.expert/explorer/testnet/contract/$contractId"
-
+Write-Host "Contract Explorer:" -ForegroundColor Cyan
+Write-Host "https://stellar.expert/explorer/testnet/contract/$ContractId"
 Write-Host ""
 Write-Host "Saved to:" -ForegroundColor Cyan
 Write-Host $ContractInfoPath
-Write-Host $EnvLocalPath
 Write-Host $ContractConfigPath
 Write-Host $DeployLogPath
-
-Write-Host ""
-Write-Host "Next step:" -ForegroundColor Cyan
-Write-Host "cd $FrontendDir"
-Write-Host "npm run dev"
-
-Write-Host ""
-Write-Host "IMPORTANT: If frontend is already running, stop it with Ctrl+C and run npm run dev again." -ForegroundColor Yellow

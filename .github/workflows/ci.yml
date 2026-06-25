@@ -1,58 +1,96 @@
-name: Battery Passport CI
+﻿name: Battery Passport Level 4 CI
 
 on:
   push:
     branches:
       - main
+      - level-4-upgrade
   pull_request:
     branches:
       - main
 
 jobs:
-  contract-tests:
-    name: Contract Tests
+  contract-validation:
+    name: Smart Contract CI
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: contract_workspace
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-
+        with:
+          targets: wasm32v1-none
       - name: Cache Cargo registry and build output
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contract_workspace
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Check smart contract for WASM target
+        run: cargo check --workspace --target wasm32v1-none
+      - name: Run smart contract tests
+        run: cargo test --workspace
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
+      - name: Build Soroban smart contract
+        run: stellar contract build
 
-      - name: Run contract tests
-        run: cargo test
-
-  frontend-build:
-    name: Frontend Build
+  frontend-validation:
+    name: Frontend CI
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: frontend
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - name: Install frontend dependencies
-        run: npm install
-
+        run: npm ci
+      - name: Type-check frontend
+        run: npm run type-check
       - name: Build frontend
         run: npm run build
+      - name: Run frontend tests
+        run: npm test
+
+  backend-validation:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Type-check backend
+        run: npm run type-check
+      - name: Build backend
+        run: npm run build
+
+  cd-config-validation:
+    name: Deployment Config Detection
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Verify deployment files exist
+        run: |
+          test -f vercel.json
+          test -f railway.toml
+          test -f Procfile
+          test -f scripts/deploy-and-save.ps1
+          test -f README.md
+          test -f docs/ARCHITECTURE.md
+          test -f docs/QUALITY_AND_DEPLOYMENT.md
